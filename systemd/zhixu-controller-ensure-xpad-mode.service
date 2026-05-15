@@ -1,0 +1,14 @@
+[Unit]
+Description=Ensure ZhiXu controller uses Xbox/xpad mode
+Documentation=https://github.com/muradkant/linux-zhixu-controller-fix
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=display-manager.service
+ConditionPathExists=/sys/module/usbcore/parameters/quirks
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zhixu-controller-ensure-xpad-mode
+
+[Install]
+WantedBy=multi-user.target
