@@ -1,6 +1,17 @@
---- /usr/src/xpad-r127.9caad15/xpad.c.before-zhixu-patch	2026-05-15 00:05:50.000000000 +0300
-+++ /usr/src/xpad-r127.9caad15/xpad.c	2026-05-15 01:49:10.611961230 +0300
-@@ -823,6 +823,14 @@
+--- /usr/src/xpad-r127.9caad15/xpad.c.before-zhixu-patch
++++ /usr/src/xpad-r127.9caad15/xpad.c
+@@ -150,6 +150,10 @@
+ module_param(auto_poweroff, bool, S_IWUSR | S_IRUGO);
+ MODULE_PARM_DESC(auto_poweroff, "Power off wireless controllers on suspend");
+ 
++static bool zhixu_suppress_rt;
++module_param(zhixu_suppress_rt, bool, S_IWUSR | S_IRUGO);
++MODULE_PARM_DESC(zhixu_suppress_rt, "Suppress the unreliable RT byte for ZhiXu 045e:028e clones");
++
+ static const struct xpad_device {
+ 	u16 idVendor;
+ 	u16 idProduct;
+@@ -823,6 +827,14 @@
  	struct timer_list ghl_poke_timer;	/* Timer for periodic poke of GHL magic data */
  };
  
@@ -15,7 +26,7 @@
  static int xpad_init_input(struct usb_xpad *xpad);
  static void xpad_deinit_input(struct usb_xpad *xpad);
  static void xpadone_ack_mode_report(struct usb_xpad *xpad, u8 seq_num);
-@@ -968,10 +976,33 @@
+@@ -968,10 +980,33 @@
  static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
  				   u16 cmd, unsigned char *data)
  {
@@ -49,7 +60,7 @@
  	/* digital pad */
  	if (xpad->mapping & MAP_DPAD_TO_BUTTONS) {
  		/* dpad as buttons (left, right, up, down) */
-@@ -989,10 +1020,22 @@
+@@ -989,10 +1024,22 @@
  	 */
  	if (!(xpad->mapping & MAP_DPAD_TO_BUTTONS) ||
  	    xpad->xtype == XTYPE_XBOX360W) {
@@ -76,7 +87,7 @@
  	}
  
  	/* start/back buttons */
-@@ -1013,11 +1056,13 @@
+@@ -1013,11 +1060,13 @@
  	input_report_key(dev, BTN_MODE,	data[3] & BIT(2));
  
  	if (!(xpad->mapping & MAP_STICKS_TO_NULL)) {
@@ -95,7 +106,22 @@
  
  		/* right stick */
  		input_report_abs(dev, ABS_RX,
-@@ -1666,13 +1711,16 @@
+@@ -1029,10 +1078,12 @@
+ 	/* triggers left/right */
+ 	if (xpad->mapping & MAP_TRIGGERS_TO_BUTTONS) {
+ 		input_report_key(dev, BTN_TL2, data[4]);
+-		input_report_key(dev, BTN_TR2, data[5]);
++		input_report_key(dev, BTN_TR2,
++				 is_zhixu && zhixu_suppress_rt ? 0 : data[5]);
+ 	} else {
+ 		input_report_abs(dev, ABS_Z, data[4]);
+-		input_report_abs(dev, ABS_RZ, data[5]);
++		input_report_abs(dev, ABS_RZ,
++				 is_zhixu && zhixu_suppress_rt ? 0 : data[5]);
+ 	}
+ 
+ 	input_sync(dev);
+@@ -1666,13 +1717,16 @@
  	have to inspect the manufacturer string.
  	Sending this sequence to other controllers will break initialization.
  	*/
@@ -115,7 +141,7 @@
  	    status = usb_control_msg(xpad->udev,
  		    usb_rcvctrlpipe(xpad->udev, 0),
  		    0x1, 0xc1,
-@@ -1694,7 +1742,7 @@
+@@ -1694,7 +1748,7 @@
  #endif
  	}
  
@@ -124,7 +150,7 @@
  	    status = usb_control_msg(xpad->udev,
  		    usb_rcvctrlpipe(xpad->udev, 0),
  		    0x1, 0xc1,
-@@ -1715,7 +1763,7 @@
+@@ -1715,7 +1769,7 @@
  #endif
  	}
  
@@ -133,7 +159,7 @@
  	    status = usb_control_msg(xpad->udev,
  		    usb_rcvctrlpipe(xpad->udev, 0),
  		    0x1, 0xc0,
-@@ -1865,6 +1913,9 @@
+@@ -1865,6 +1919,9 @@
  	if (xpad->xtype == XTYPE_UNKNOWN)
  		return 0;
  
@@ -143,7 +169,7 @@
  	input_set_capability(xpad->dev, EV_FF, FF_RUMBLE);
  
  	return input_ff_create_memless(xpad->dev, NULL, xpad_play_effect);
-@@ -1975,6 +2026,9 @@
+@@ -1975,6 +2032,9 @@
  	if (xpad->xtype != XTYPE_XBOX360 && xpad->xtype != XTYPE_XBOX360W)
  		return 0;
  

@@ -37,6 +37,17 @@ and Right on the tested unit. D-pad Left did not emit raw USB input on the
 tested controller, so that appears to be a hardware/controller-firmware issue
 on that unit rather than an `xpad` mapping issue.
 
+Later testing in eFootball found a separate issue: the raw Xbox-mode packet
+byte that stock `xpad` treats as the right trigger (`RT` / `ABS_RZ`) alternated
+between `0x00` and `0xff` while the controller was idle. After an intentional
+`RT` press, the same byte could remain stuck at the raw value seen while
+pressed even after the trigger was released. Games interpreted this as repeated
+or latched full `RT`, causing unintended dash-dribble behavior.
+
+This patch also adds an optional same-device `zhixu_suppress_rt` module
+parameter for the eFootball phantom-RT issue. See
+`docs/efootball-phantom-rt.md` for the runtime helper and tradeoffs.
+
 ## Contents
 
 ```text
@@ -50,12 +61,24 @@ docs/investigation-report.md
   Sanitized investigation log with command history, evidence, and rollback
   notes.
 
+docs/efootball-phantom-rt.md
+  Focused explanation and usage notes for the optional eFootball runtime
+  workaround.
+
 scripts/apply-to-xpad-dkms-source.sh
   Helper script to copy src/xpad.c into an installed xpad-dkms-git source tree.
 
 scripts/zhixu-controller-ensure-xpad-mode.sh
   Boot-time helper that re-authorizes the controller only if it appears as
   `0079:181c` HID/DragonRise mode.
+
+tools/zhixu-rt-raw-probe.sh
+  Raw usbmon capture helper used to compare idle, physical-RT-held, and
+  released windows during the eFootball investigation.
+
+tools/zhixu-rt-suppress-run.c
+  Foreground helper that enables `zhixu_suppress_rt` while it runs and restores
+  the previous value when stopped.
 
 systemd/zhixu-controller-ensure-xpad-mode.service
   Optional systemd unit for running the boot-time helper before the display
@@ -97,6 +120,26 @@ sudo mkinitcpio -P
 ```
 
 Adjust kernel versions and module version for your system.
+
+### Same-device RT suppression
+
+Build the run-while-active helper:
+
+```bash
+make
+```
+
+Run it while playing games affected by phantom `RT`:
+
+```bash
+sudo ./bin/zhixu-rt-suppress-run
+```
+
+While the helper runs, it sets `/sys/module/xpad/parameters/zhixu_suppress_rt`
+to `Y`. Stop it with `Ctrl+C`; it restores the previous value before exiting.
+The controller remains the real `Microsoft X-Box 360 pad` on the original
+`event`/`js` nodes. `ABS_RZ` remains at `0` only while the helper has the
+option enabled.
 
 ### Multi-mode controller quirk
 
@@ -155,6 +198,13 @@ Use `evtest`:
 
 ```bash
 evtest /dev/input/by-id/usb-ZhiXu_Controller-event-joystick
+```
+
+If `/dev/input/by-id` is not present, use the controller event node shown under
+`/sys/class/input/event*/device/name`. On the tested machine this was often:
+
+```bash
+evtest /dev/input/event17
 ```
 
 Expected behavior on the tested controller:

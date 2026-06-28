@@ -1422,3 +1422,166 @@ sudo rm -f /etc/udev/rules.d/99-zhixu-controller-xpad-mode.rules
 sudo systemctl daemon-reload
 sudo udevadm control --reload
 ```
+
+## Follow-up: Phantom eFootball Dash Dribble / RT Input
+
+Date: 2026-06-27 Asia/Amman
+
+Observed symptom:
+
+```text
+In eFootball, the controlled player showed the dash-dribble indicator and
+knocked the ball ahead while only the physical left stick was being used.
+```
+
+Interpretation of the game behavior:
+
+```text
+eFootball's Basic Controls overlay describes Dash Dribble as LS + RT. The
+larger ball touch / ball pushed ahead behavior is consistent with the game
+receiving RT while the left stick is held.
+```
+
+Linux input capture while only the left stick was moved showed repeated
+right-trigger events:
+
+```text
+ABS_RZ value 255
+ABS_RZ value 0
+ABS_RZ value 255
+ABS_RZ value 0
+```
+
+For the Xbox 360 input mapping, `ABS_RZ` is the right trigger (`RT`).
+
+Raw USB packet capture was then used to verify whether this came from the
+controller packet before `xpad` processed it.
+
+Command shape used:
+
+```bash
+sudo modprobe usbmon
+sudo timeout 10 cat /sys/kernel/debug/usb/usbmon/1u \
+  | awk '/C Ii:1:029:/ { payload=$0; sub(/^.* = /, "", payload); count[payload]++ } END { for (p in count) print count[p], p }' \
+  | sort -nr | head -30
+```
+
+Idle-only raw USB result:
+
+```text
+4987 00140000 00000000 00000000 00000000 00000000
+4976 00140000 00ff0000 00000000 00000000 00000000
+```
+
+Interpretation: with no physical input, the packet byte that stock `xpad`
+reports as `ABS_RZ` alternated between `0x00` and `0xff`. This is below Wine,
+Proton, and eFootball.
+
+Additional capture while `RT` was reportedly held still showed alternating
+packets:
+
+```text
+2841 00140000 00ff0000 00000000 00000000 00000000
+2800 00140000 00000000 00000000 00000000 00000000
+```
+
+Conclusion: for this tested `ZhiXu` clone in `045e:028e` Xbox mode, the byte
+that the standard Xbox 360 parser uses for `RT` is not a reliable right-trigger
+signal. It creates phantom `RT` input at idle and does not expose a distinct
+stable held-RT state in the captures.
+
+An attempted debounce/inversion patch was tested after this, because repeated
+RT presses skewed the raw byte toward `0x00`. That preserved an intentional RT
+press in one evtest capture:
+
+```text
+ABS_RZ value 255
+```
+
+However, after physical RT release, raw USB remained constant at the same
+signature:
+
+```text
+run 00 7652
+count 00 7652
+```
+
+A follow-up full-packet capture while RT was physically released showed no
+alternate byte changing:
+
+```text
+11810 0014000000000000000000000000000000000000
+```
+
+Interpretation: after an RT press, the tested controller can keep reporting the
+same raw packet state while RT is physically released. There is no reliable
+press/release distinction in the observed Xbox-mode packet stream for the
+driver to map.
+
+Final kernel patch decision:
+
+```text
+Preserve all previous ZhiXu-scoped fixes:
+- startup sequence for the clone
+- left stick from D-pad bits to ABS_X / ABS_Y
+- physical D-pad from old analog bytes to ABS_HAT0X / ABS_HAT0Y
+- force-feedback and LED suppression
+
+Add one optional ZhiXu-scoped eFootball workaround:
+- module parameter: zhixu_suppress_rt
+- when enabled, force ABS_RZ / RT to released for this clone only
+- leave every other physical button/stick mapping unchanged
+```
+
+The parameter defaults to disabled, so a normal module load keeps stock raw
+`RT` behavior. The final UX is a small foreground helper binary that enables
+`zhixu_suppress_rt` while it runs and restores the previous value when it exits.
+
+Rejected userspace direction:
+
+```text
+A uinput proxy can suppress ABS_RZ on a virtual controller, but it must grab
+the real event device. In eFootball, this made the already-running game behave
+as if the controller was disconnected instead of switching to the new virtual
+controller. This is not the recommended workaround for this game.
+```
+
+Tradeoff: with `zhixu_suppress_rt=1`, `RT` is intentionally unavailable. This
+is preferable to reporting phantom or latched full-press `RT` in eFootball.
+
+### Same-device RT suppression build/run
+
+Commands used:
+
+```bash
+sudo ./scripts/apply-to-xpad-dkms-source.sh
+sudo dkms build --force xpad/r127.9caad15 -k 7.1.1-2-cachyos
+sudo dkms install --force xpad/r127.9caad15 -k 7.1.1-2-cachyos
+sudo modprobe -r xpad
+sudo modprobe xpad
+make
+sudo ./bin/zhixu-rt-suppress-run
+```
+
+Observed result:
+
+```text
+ZhiXu RT suppression enabled. Press Ctrl+C to disable it.
+/sys/module/xpad/parameters/zhixu_suppress_rt: Y
+Input device name: "Microsoft X-Box 360 pad"
+Handlers: event17 js0
+```
+
+Idle verification of the real controller:
+
+```text
+Input device name: "Microsoft X-Box 360 pad"
+ABS_RZ value at start: 0
+No ABS_RZ events emitted during idle capture.
+```
+
+After `Ctrl+C`, the helper restores the previous parameter value. If the
+previous value was `N`, `RT` suppression is disabled again.
+
+The user-facing version of this workflow is documented separately in
+`docs/efootball-phantom-rt.md`.

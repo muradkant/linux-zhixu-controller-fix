@@ -150,6 +150,10 @@ static bool auto_poweroff = true;
 module_param(auto_poweroff, bool, S_IWUSR | S_IRUGO);
 MODULE_PARM_DESC(auto_poweroff, "Power off wireless controllers on suspend");
 
+static bool zhixu_suppress_rt;
+module_param(zhixu_suppress_rt, bool, S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(zhixu_suppress_rt, "Suppress the unreliable RT byte for ZhiXu 045e:028e clones");
+
 static const struct xpad_device {
 	u16 idVendor;
 	u16 idProduct;
@@ -1074,10 +1078,12 @@ static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
 	/* triggers left/right */
 	if (xpad->mapping & MAP_TRIGGERS_TO_BUTTONS) {
 		input_report_key(dev, BTN_TL2, data[4]);
-		input_report_key(dev, BTN_TR2, data[5]);
+		input_report_key(dev, BTN_TR2,
+				 is_zhixu && zhixu_suppress_rt ? 0 : data[5]);
 	} else {
 		input_report_abs(dev, ABS_Z, data[4]);
-		input_report_abs(dev, ABS_RZ, data[5]);
+		input_report_abs(dev, ABS_RZ,
+				 is_zhixu && zhixu_suppress_rt ? 0 : data[5]);
 	}
 
 	input_sync(dev);
