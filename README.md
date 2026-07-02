@@ -22,6 +22,17 @@ games. On the tested machine, adding `usbcore.quirks=057e:2009:ik` to the
 kernel command line and replugging the controller made it enumerate back as
 `045e:028e`, where this `xpad` patch applies.
 
+## Tested Machine Circumstance
+
+The laptop touchpad on the tested machine is physically broken or otherwise
+non-functional. The ZhiXu controller is therefore also used as a desktop
+pointing device through an included AntiMicroX profile. That desktop mapping is
+an accessibility/workaround layer, not part of the kernel driver fix.
+
+Games must see the patched real controller but must not see AntiMicroX's
+additional virtual keyboard and mouse devices. The optional game guard included
+in this repository enforces that separation for Steam and Lutris.
+
 ## Symptoms Fixed
 
 On the tested controller, Linux initially treated the physical left stick as
@@ -51,6 +62,10 @@ parameter for the eFootball phantom-RT issue. See
 ## Contents
 
 ```text
+antimicrox/desktop.gamecontroller.amgp
+  Tested AntiMicroX desktop mouse/keyboard profile used because the laptop
+  touchpad is not functional.
+
 src/xpad.c
   Full patched xpad.c from xpad-dkms-git r127.9caad15.
 
@@ -65,8 +80,23 @@ docs/efootball-phantom-rt.md
   Focused explanation and usage notes for the optional eFootball runtime
   workaround.
 
+docs/desktop-controller-mapping.md
+  Optional isolation layer for using the real controller as a desktop mouse
+  without exposing the virtual mouse/keyboard devices to Steam or Lutris games.
+
 scripts/apply-to-xpad-dkms-source.sh
   Helper script to copy src/xpad.c into an installed xpad-dkms-git source tree.
+
+scripts/controller-mouse-game-guard
+  User-session guard that suspends a controller-to-mouse mapper while Steam or
+  explicitly wrapped games run.
+
+scripts/controller-mouse-toggle.sh
+  Manual desktop-mapper toggle with a desktop notification.
+
+scripts/game-with-controller.sh
+  Command wrapper used by Lutris to inhibit the desktop mapper before a game
+  process starts.
 
 scripts/zhixu-controller-ensure-xpad-mode.sh
   Boot-time helper that re-authorizes the controller only if it appears as
@@ -83,6 +113,13 @@ tools/zhixu-rt-suppress-run.c
 systemd/zhixu-controller-ensure-xpad-mode.service
   Optional systemd unit for running the boot-time helper before the display
   manager starts.
+
+systemd/controller-mouse-game-guard.service
+  Optional user unit for automatically separating a desktop AntiMicroX mapper
+  from Steam and Lutris games.
+
+systemd/controller-mouse.service
+  User unit that loads the included AntiMicroX desktop profile.
 
 udev/99-zhixu-controller-xpad-mode.rules
   Optional udev rule that triggers the helper whenever the controller appears
@@ -191,6 +228,31 @@ sudo rm -f /etc/udev/rules.d/99-zhixu-controller-xpad-mode.rules
 sudo systemctl daemon-reload
 sudo udevadm control --reload
 ```
+
+### Broken-touchpad desktop mouse and game isolation
+
+The patched `xpad` device and a desktop controller-to-mouse mapper serve
+different purposes:
+
+- the patched real `Microsoft X-Box 360 pad` must remain visible to games;
+- the included AntiMicroX profile replaces the non-functional laptop touchpad
+  for desktop navigation;
+- AntiMicroX virtual keyboard/mouse devices can cause duplicate or mixed input
+  inside games and must be removed from the game environment.
+
+The repository includes the tested profile, its `controller-mouse.service`,
+manual toggle, and the isolation guard. The guard stops only the user mapper
+service while a Steam or Lutris game runs. It does not unload `xpad`, grab the
+real controller, change `zhixu_suppress_rt`, or require root privileges. Steam
+games are detected from their `app-steam-app*.scope` systemd units. Lutris
+games use a synchronous command prefix, ensuring the mapper stops before the
+game process starts. Because the tested clone re-enumerates when its final
+evdev reader closes, the persistent guard keeps one non-exclusive read-only
+descriptor open; games can still read the same real controller normally.
+
+Installation, Lutris configuration, runtime behavior, verification, and
+rollback are documented in
+[`docs/desktop-controller-mapping.md`](docs/desktop-controller-mapping.md).
 
 ## Verification
 

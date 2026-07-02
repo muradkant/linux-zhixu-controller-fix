@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+
+import argparse
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+
+MAPPER_UNIT = "controller-mouse.service"
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+STATE_DIR = RUNTIME_DIR / "controller-mouse-game-guard"
+TOKEN_DIR = STATE_DIR / "inhibitors"
+RESTORE_FILE = STATE_DIR / "restore-mapper"
+LOCK_FILE = STATE_DIR / "lock"
+CONTROLLER_NAME = os.environ.get(
+    "CONTROLLER_MOUSE_DEVICE_NAME",
+    "Microsoft X-Box 360 pad",
+)
+steam_units: set[str] = set()
+controller_fd: int | None = None
+
+
+def ensure_state_dir() -> None:
+    TOKEN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def run_systemctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def mapper_is_active() -> bool:
+    return run_systemctl("is-active", "--quiet", MAPPER_UNIT).returncode == 0
+
+
+def ensure_controller_hold() -> bool:
+    global controller_fd
+
+    if controller_fd is not None:
+        try:
+            while True:
+                if not os.read(controller_fd, 4096):
+                    raise OSError("controller disconnected")
+        except BlockingIOError:
+            return True
+        except OSError:
+            try:
+                os.close(controller_fd)
+            except OSError:
+                pass
+            controller_fd = None
+
+    for name_file in Path("/sys/class/input").glob("event*/device/name"):
+        try:
+            if name_file.read_text(encoding="utf-8").strip() != CONTROLLER_NAME:
+                continue
+            event_node = Path("/dev/input") / name_file.parents[1].name
+            controller_fd = os.open(event_node, os.O_RDONLY | os.O_NONBLOCK)
+            return True
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+
+    return False
+
+
+def read_process_markers() -> set[str]:
+    sources: set[str] = set()
+
+    try:
+        processes = tuple(Path("/proc").iterdir())
+    except OSError:
+        return sources
+
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+
+        try:
+            entries = (process / "environ").read_bytes().split(b"\0")
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+
+        for entry in entries:
+            if entry.startswith(b"LUTRIS_GAME_UUID=") and entry != b"LUTRIS_GAME_UUID=":
+                sources.add("lutris")
+            elif entry.startswith((b"SteamAppId=", b"SteamGameId=")):
+                _, _, value = entry.partition(b"=")
+                if value.isdigit() and int(value) != 0:
+                    sources.add("steam")
+
+        if len(sources) == 2:
+            break
+
+    return sources
+
+
+def steam_scope_exists() -> bool:
+    uid = os.getuid()
+    app_slice = Path(
+        f"/sys/fs/cgroup/user.slice/user-{uid}.slice/"
+        f"user@{uid}.service/app.slice"
+    )
+
+    try:
+        return any(app_slice.glob("app-steam-app*.scope"))
+    except OSError:
+        return False
+
+
+def clean_and_read_tokens() -> set[str]:
+    ensure_state_dir()
+    tokens: set[str] = set()
+
+    for token in TOKEN_DIR.iterdir():
+        try:
+            owner_pid = int(token.name.split("-", 1)[0])
+        except ValueError:
+            owner_pid = 0
+
+        if owner_pid > 0 and not Path(f"/proc/{owner_pid}").exists():
+            try:
+                token.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+
+        tokens.add(token.name)
+
+    return tokens
+
+
+def active_sources(force_process_scan: bool = False) -> set[str]:
+    sources = read_process_markers() if force_process_scan else set()
+    if steam_units or steam_scope_exists():
+        sources.add("steam")
+    if clean_and_read_tokens():
+        sources.add("wrapper")
+    return sources
+
+
+def reconcile_locked(force_process_scan: bool = False) -> set[str]:
+    sources = active_sources(force_process_scan)
+
+    if sources:
+        if mapper_is_active():
+            ensure_controller_hold()
+            RESTORE_FILE.touch(mode=0o600, exist_ok=True)
+            run_systemctl("stop", MAPPER_UNIT)
+    elif RESTORE_FILE.exists():
+        if run_systemctl("start", MAPPER_UNIT).returncode == 0:
+            try:
+                RESTORE_FILE.unlink()
+            except FileNotFoundError:
+                pass
+
+    return sources
+
+
+def with_lock(callback):
+    ensure_state_dir()
+    with LOCK_FILE.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return callback()
+
+
+def reconcile(force_process_scan: bool = False) -> set[str]:
+    return with_lock(lambda: reconcile_locked(force_process_scan))
+
+
+def add_inhibitor(name: str) -> None:
+    def update() -> None:
+        ensure_state_dir()
+        (TOKEN_DIR / name).touch(mode=0o600, exist_ok=True)
+        reconcile_locked()
+
+    with_lock(update)
+
+
+def remove_inhibitor(name: str) -> None:
+    def update() -> None:
+        try:
+            (TOKEN_DIR / name).unlink()
+        except FileNotFoundError:
+            pass
+        reconcile_locked()
+
+    with_lock(update)
+
+
+def print_status() -> int:
+    sources = reconcile(force_process_scan=True)
+    mapper = "active" if mapper_is_active() else "inactive"
+    restore = "yes" if RESTORE_FILE.exists() else "no"
+    source_text = ",".join(sorted(sources)) if sources else "none"
+    print(f"sources={source_text} mapper={mapper} restore={restore}")
+    return 0
+
+
+def monitor() -> int:
+    ensure_controller_hold()
+    reconcile()
+
+    try:
+        import dbus
+        from dbus.mainloop.glib import DBusGMainLoop
+        from gi.repository import GLib
+    except ImportError:
+        while True:
+            ensure_controller_hold()
+            reconcile()
+            time.sleep(0.5)
+
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    manager = bus.get_object(
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1",
+    )
+
+    def unit_added(unit_name, _unit_path) -> None:
+        unit_name = str(unit_name)
+        if unit_name.startswith("app-steam-app"):
+            steam_units.add(unit_name)
+            reconcile()
+
+    def unit_removed(unit_name, _unit_path) -> None:
+        unit_name = str(unit_name)
+        if not unit_name.startswith("app-steam-app"):
+            return
+
+        steam_units.discard(unit_name)
+
+        def reconcile_after_cgroup_removal() -> bool:
+            reconcile()
+            return False
+
+        GLib.timeout_add(250, reconcile_after_cgroup_removal)
+
+    bus.add_signal_receiver(
+        unit_added,
+        signal_name="UnitNew",
+        dbus_interface="org.freedesktop.systemd1.Manager",
+    )
+    bus.add_signal_receiver(
+        unit_removed,
+        signal_name="UnitRemoved",
+        dbus_interface="org.freedesktop.systemd1.Manager",
+    )
+
+    def periodic_reconcile() -> bool:
+        ensure_controller_hold()
+        reconcile()
+        return True
+
+    GLib.timeout_add_seconds(2, periodic_reconcile)
+    manager.Subscribe(dbus_interface="org.freedesktop.systemd1.Manager")
+    GLib.MainLoop().run()
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Keep the desktop controller mapper out of Steam and Lutris games."
+    )
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--monitor", action="store_true")
+    actions.add_argument("--once", action="store_true")
+    actions.add_argument("--status", action="store_true")
+    actions.add_argument("--inhibit", metavar="TOKEN")
+    actions.add_argument("--release", metavar="TOKEN")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if args.inhibit:
+        add_inhibitor(args.inhibit)
+        return 0
+    if args.release:
+        remove_inhibitor(args.release)
+        return 0
+    if args.status:
+        return print_status()
+    if args.once:
+        reconcile()
+        return 0
+    return monitor()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)
