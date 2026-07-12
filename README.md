@@ -31,7 +31,9 @@ an accessibility/workaround layer, not part of the kernel driver fix.
 
 Games must see the patched real controller but must not see AntiMicroX's
 additional virtual keyboard and mouse devices. The optional game guard included
-in this repository enforces that separation for Steam and Lutris.
+in this repository enforces that separation for Steam, Lutris, and launchers
+such as [RetroPort](https://github.com/muradkant/retrobat-portable) that use its
+documented inhibitor protocol.
 
 ## Symptoms Fixed
 
@@ -82,7 +84,7 @@ docs/efootball-phantom-rt.md
 
 docs/desktop-controller-mapping.md
   Optional isolation layer for using the real controller as a desktop mouse
-  without exposing the virtual mouse/keyboard devices to Steam or Lutris games.
+  without exposing the virtual mouse/keyboard devices to game sessions.
 
 scripts/apply-to-xpad-dkms-source.sh
   Helper script to copy src/xpad.c into an installed xpad-dkms-git source tree.
@@ -116,7 +118,7 @@ systemd/zhixu-controller-ensure-xpad-mode.service
 
 systemd/controller-mouse-game-guard.service
   Optional user unit for automatically separating a desktop AntiMicroX mapper
-  from Steam and Lutris games.
+  from Steam, Lutris, and integrated game launchers.
 
 systemd/controller-mouse.service
   User unit that loads the included AntiMicroX desktop profile.
@@ -242,13 +244,14 @@ different purposes:
 
 The repository includes the tested profile, its `controller-mouse.service`,
 manual toggle, and the isolation guard. The guard stops only the user mapper
-service while a Steam or Lutris game runs. It does not unload `xpad`, grab the
-real controller, change `zhixu_suppress_rt`, or require root privileges. Steam
-games are detected from their `app-steam-app*.scope` systemd units. Lutris
-games use a synchronous command prefix, ensuring the mapper stops before the
-game process starts. Because the tested clone re-enumerates when its final
-evdev reader closes, the persistent guard keeps one non-exclusive read-only
-descriptor open; games can still read the same real controller normally.
+service while a guarded game runs. It does not unload `xpad`, grab the real
+controller, change `zhixu_suppress_rt`, or require root privileges. Steam games
+are detected from their `app-steam-app*.scope` systemd units. Lutris uses a
+synchronous command prefix. RetroPort v0.1.6 and newer acquire the guard's
+public inhibitor protocol as part of their emulator process lifecycle. Because
+the tested clone re-enumerates when its final evdev reader closes, the
+persistent guard keeps one non-exclusive read-only descriptor open; games can
+still read the same real controller normally.
 
 Installation, Lutris configuration, runtime behavior, verification, and
 rollback are documented in

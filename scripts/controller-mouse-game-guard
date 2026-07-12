@@ -267,7 +267,10 @@ def monitor() -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Keep the desktop controller mapper out of Steam and Lutris games."
+        description=(
+            "Keep the desktop controller mapper out of Steam, Lutris, and "
+            "integrated launcher game sessions."
+        )
     )
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--monitor", action="store_true")

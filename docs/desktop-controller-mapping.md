@@ -13,7 +13,7 @@ and mouse devices must not.
 
 ## Architecture
 
-| Layer | Runtime device | Desktop | Steam/Lutris game |
+| Layer | Runtime device | Desktop | Guarded game session |
 | --- | --- | --- | --- |
 | Patched `xpad` | Real `Microsoft X-Box 360 pad` | Present | Present |
 | Included `controller-mouse.service` | AntiMicroX virtual keyboard/mouse | Present | Stopped and absent |
@@ -79,7 +79,33 @@ inhibitor before executing the runner command and removes it when that command
 exits. This stops the mapper before the game process starts.
 
 Multiple and overlapping games are supported. Exiting one game cannot restore
-the mapper while another Steam or Lutris game remains active.
+the mapper while another Steam, Lutris, RetroPort, or wrapped game remains
+active.
+
+### RetroPort and the public inhibitor protocol
+
+[RetroPort](https://github.com/muradkant/retrobat-portable) v0.1.6 and newer
+integrates the guard directly. On Linux it discovers
+`~/.local/bin/controller-mouse-game-guard`, or the executable named by
+`CONTROLLER_MOUSE_GAME_GUARD`, and performs this lifecycle:
+
+```text
+before emulator spawn:  controller-mouse-game-guard --inhibit PID-retroport-N
+after full process tree: controller-mouse-game-guard --release PID-retroport-N
+```
+
+The inhibitor remains active through emulator loading, normal exit, and
+RetroPort's TERMINATE action. A failed emulator spawn releases it through the
+same ownership guard. Tokens are unique and compose with existing Steam or
+Lutris inhibitors, so one game cannot restore AntiMicroX while another game
+still owns the controller.
+
+This integration was verified with a real Wine/RetroArch game process: the
+idle state was `sources=none mapper=active restore=no`; during play it became
+`sources=wrapper mapper=inactive restore=yes` with no AntiMicroX process; after
+the complete emulator process tree exited it returned to the exact idle state.
+Wine continued to enumerate the physical XInput controller while the virtual
+desktop mapper was absent.
 
 ## Requirements
 
@@ -169,11 +195,13 @@ Typical idle output:
 sources=none mapper=active restore=no
 ```
 
-Typical in-game output:
+Typical Steam in-game output:
 
 ```text
 sources=steam mapper=inactive restore=yes
 ```
+
+An integrated launcher such as RetroPort reports `sources=wrapper` instead.
 
 ## Verification
 
@@ -226,6 +254,21 @@ In one terminal:
 
 Run the same service and input-device checks in another terminal. The expected
 state is identical to the Steam test.
+
+### RetroPort lifecycle
+
+With an imported RetroPort game, click PLAY and inspect the guard while the
+emulator is running:
+
+```bash
+controller-mouse-game-guard --status
+systemctl --user is-active controller-mouse.service || true
+pgrep -x antimicrox || true
+```
+
+Expected during play: `sources=wrapper`, mapper inactive, and no AntiMicroX
+PID. Exit normally or use TERMINATE. The expected final state is
+`sources=none mapper=active restore=no`, with AntiMicroX running again.
 
 ### Patched driver remains active
 

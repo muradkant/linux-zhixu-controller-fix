@@ -1,5 +1,5 @@
 [Unit]
-Description=Keep the desktop controller mapper out of Steam and Lutris games
+Description=Keep the desktop controller mapper out of guarded game sessions
 After=graphical-session.target
 PartOf=graphical-session.target
 
