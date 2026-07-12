@@ -1,287 +1,186 @@
-# linux-zhixu-controller-fix
+# Linux ZhiXu controller fix
 
-Linux `xpad` workaround for a ZhiXu Xbox 360 clone controller that spoofs
-Microsoft's wired Xbox 360 controller USB ID.
-
-## Device
-
-Tested device:
+A device-scoped `xpad` patch for one ZhiXu Xbox 360 clone that impersonates
+Microsoft's `045e:028e` wired controller.
 
 ```text
-Xbox mode USB vendor:    045e
-Xbox mode USB product:   028e
-Xbox mode manufacturer:  ZhiXu
-Xbox mode product:       Controller
-Xbox mode driver:        xpad
+USB ID       045e:028e
+Manufacturer ZhiXu
+Product      Controller
+Driver       xpad
 ```
 
-The same physical controller can also appear as `0079:181c` (`ZhiXu Gamepad`,
-DragonRise HID mode). In that mode it is handled by `hid-generic`, bypasses
-this `xpad` patch, and can expose the physical D-pad and left stick inverted to
-games. On the tested machine, adding `usbcore.quirks=057e:2009:ik` to the
-kernel command line and replugging the controller made it enumerate back as
-`045e:028e`, where this `xpad` patch applies.
+On the tested unit, the physical left stick arrived as D-pad bits, the physical
+D-pad arrived in the nominal left-stick bytes, and ordinary LED/rumble output
+could destabilize USB. The patch:
 
-## Tested Machine Circumstance
+- identifies only `045e:028e` with manufacturer `ZhiXu`;
+- maps the clone's D-pad bits to `ABS_X` / `ABS_Y`;
+- maps its old analog bytes to `ABS_HAT0X` / `ABS_HAT0Y`;
+- disables LED and force-feedback output for this clone; and
+- offers opt-in suppression for its unreliable right-trigger byte.
 
-The laptop touchpad on the tested machine is physically broken or otherwise
-non-functional. The ZhiXu controller is therefore also used as a desktop
-pointing device through an included AntiMicroX profile. That desktop mapping is
-an accessibility/workaround layer, not part of the kernel driver fix.
+This fixed GTA IV movement and restored Max Payne 3's D-pad Up, Down, and Right
+on the tested controller. At one stage D-pad Left emitted no raw USB signal at
+all; later Xbox-mode capture did report it. Treat every result here as specific
+to this hardware revision and verify your own unit at the Linux input layer.
 
-Games must see the patched real controller but must not see AntiMicroX's
-additional virtual keyboard and mouse devices. The optional game guard included
-in this repository enforces that separation for Steam, Lutris, and launchers
-such as [RetroPort](https://github.com/muradkant/retrobat-portable) that use its
-documented inhibitor protocol.
+## Before installing
 
-## Symptoms Fixed
+This is not a packaged driver. `src/xpad.c` is a complete patched copy of
+`xpad-dkms-git` revision `r127.9caad15`; the helper replaces that revision's
+DKMS source. Do not copy it over an unrelated `xpad` version.
 
-On the tested controller, Linux initially treated the physical left stick as
-D-pad/hat input. In Wine/Proton games this caused wrong in-game behavior:
+Install the matching DKMS package and kernel headers first. On Arch-family
+systems the tested package was AUR `xpad-dkms-git 1:r127.9caad15-1`.
 
-- GTA IV: left stick changed radio stations or opened the phone instead of
-  steering/moving.
-- Max Payne 3: D-pad Up did not work for taking painkillers after preserving
-  the left-stick fix.
-
-This patch keeps the working left-stick behavior and restores D-pad Up, Down,
-and Right on the tested unit. D-pad Left did not emit raw USB input on the
-tested controller, so that appears to be a hardware/controller-firmware issue
-on that unit rather than an `xpad` mapping issue.
-
-Later testing in eFootball found a separate issue: the raw Xbox-mode packet
-byte that stock `xpad` treats as the right trigger (`RT` / `ABS_RZ`) alternated
-between `0x00` and `0xff` while the controller was idle. After an intentional
-`RT` press, the same byte could remain stuck at the raw value seen while
-pressed even after the trigger was released. Games interpreted this as repeated
-or latched full `RT`, causing unintended dash-dribble behavior.
-
-This patch also adds an optional same-device `zhixu_suppress_rt` module
-parameter for the eFootball phantom-RT issue. See
-`docs/efootball-phantom-rt.md` for the runtime helper and tradeoffs.
-
-## Contents
-
-```text
-antimicrox/desktop.gamecontroller.amgp
-  Tested AntiMicroX desktop mouse/keyboard profile used because the laptop
-  touchpad is not functional.
-
-src/xpad.c
-  Full patched xpad.c from xpad-dkms-git r127.9caad15.
-
-patches/0001-zhixu-045e-028e-controller-fix.patch
-  Unified diff from the pre-fix xpad.c source to the patched source.
-
-docs/investigation-report.md
-  Sanitized investigation log with command history, evidence, and rollback
-  notes.
-
-docs/efootball-phantom-rt.md
-  Focused explanation and usage notes for the optional eFootball runtime
-  workaround.
-
-docs/desktop-controller-mapping.md
-  Optional isolation layer for using the real controller as a desktop mouse
-  without exposing the virtual mouse/keyboard devices to game sessions.
-
-scripts/apply-to-xpad-dkms-source.sh
-  Helper script to copy src/xpad.c into an installed xpad-dkms-git source tree.
-
-scripts/controller-mouse-game-guard
-  User-session guard that suspends a controller-to-mouse mapper while Steam or
-  explicitly wrapped games run.
-
-scripts/controller-mouse-toggle.sh
-  Manual desktop-mapper toggle with a desktop notification.
-
-scripts/game-with-controller.sh
-  Command wrapper used by Lutris to inhibit the desktop mapper before a game
-  process starts.
-
-scripts/zhixu-controller-ensure-xpad-mode.sh
-  Boot-time helper that re-authorizes the controller only if it appears as
-  `0079:181c` HID/DragonRise mode.
-
-tools/zhixu-rt-raw-probe.sh
-  Raw usbmon capture helper used to compare idle, physical-RT-held, and
-  released windows during the eFootball investigation.
-
-tools/zhixu-rt-suppress-run.c
-  Foreground helper that enables `zhixu_suppress_rt` while it runs and restores
-  the previous value when stopped.
-
-systemd/zhixu-controller-ensure-xpad-mode.service
-  Optional systemd unit for running the boot-time helper before the display
-  manager starts.
-
-systemd/controller-mouse-game-guard.service
-  Optional user unit for automatically separating a desktop AntiMicroX mapper
-  from Steam, Lutris, and integrated game launchers.
-
-systemd/controller-mouse.service
-  User unit that loads the included AntiMicroX desktop profile.
-
-udev/99-zhixu-controller-xpad-mode.rules
-  Optional udev rule that triggers the helper whenever the controller appears
-  in `0079:181c` HID/DragonRise mode.
-```
-
-## Installation Notes
-
-This is not a packaged driver. It is a source-level workaround intended for
-users already using `xpad-dkms-git` or a similar DKMS source tree.
-
-Default source path used during testing:
-
-```text
-/usr/src/xpad-r127.9caad15/xpad.c
-```
-
-Apply the patched file:
-
-```bash
+```sh
+git clone https://github.com/muradkant/linux-zhixu-controller-fix.git
+cd linux-zhixu-controller-fix
 sudo ./scripts/apply-to-xpad-dkms-source.sh
 ```
 
-Then rebuild and reload the DKMS module for your installed kernels. Example
-from the tested machine:
+The script backs up the installed source beside it before replacement. If your
+path differs from `/usr/src/xpad-r127.9caad15/xpad.c`, pass it explicitly.
 
-```bash
-sudo dkms build --force xpad/r127.9caad15 -k 7.0.5-2-cachyos
-sudo dkms install --force xpad/r127.9caad15 -k 7.0.5-2-cachyos
-sudo dkms build --force xpad/r127.9caad15 -k 6.18.28-1-cachyos-lts
-sudo dkms install --force xpad/r127.9caad15 -k 6.18.28-1-cachyos-lts
+Rebuild—not merely reinstall—the module for each kernel, then reload it. For
+example:
+
+```sh
+kernel=$(uname -r)
+sudo dkms build --force xpad/r127.9caad15 -k "$kernel"
+sudo dkms install --force xpad/r127.9caad15 -k "$kernel"
 sudo modprobe -r xpad
 sudo modprobe xpad
-sudo mkinitcpio -P
 ```
 
-Adjust kernel versions and module version for your system.
+Repeat the two DKMS commands for every installed kernel and regenerate that
+distribution's initramfs. A running game may retain the old input device;
+restart it after reloading the module.
 
-### Same-device RT suppression
+## Verify the driver
 
-Build the run-while-active helper:
+Confirm identity and module selection:
 
-```bash
-make
+```sh
+lsusb -d 045e:028e
+modinfo -F filename xpad
+dkms status xpad
+evtest /dev/input/by-id/usb-ZhiXu_Controller-event-joystick
 ```
 
-Run it while playing games affected by phantom `RT`:
+Expected on this unit:
 
-```bash
-sudo ./bin/zhixu-rt-suppress-run
-```
+- left stick → `ABS_X` / `ABS_Y` (digital full-scale endpoints);
+- D-pad → `ABS_HAT0X` / `ABS_HAT0Y`;
+- diagonal stick movement → simultaneous X and Y;
+- no force-feedback capability.
 
-While the helper runs, it sets `/sys/module/xpad/parameters/zhixu_suppress_rt`
-to `Y`. Stop it with `Ctrl+C`; it restores the previous value before exiting.
-The controller remains the real `Microsoft X-Box 360 pad` on the original
-`event`/`js` nodes. `ABS_RZ` remains at `0` only while the helper has the
-option enabled.
+The stable by-id path is preferable to an `eventN` number, which changes after
+re-enumeration.
 
-### Multi-mode controller quirk
+## Alternate HID mode
 
-If the controller appears as `0079:181c DragonRise Inc. Gamepad` / `ZhiXu
-Gamepad`, the `xpad` patch is not active. The tested system was fixed by adding
-this kernel parameter:
+The same hardware can enumerate as `0079:181c`, product `ZhiXu Gamepad`, under
+`hid-generic`. That mode bypasses this patch and can swap the effective stick
+and D-pad. On the tested machine, this kernel argument made a fresh connection
+choose Xbox mode:
 
 ```text
 usbcore.quirks=057e:2009:ik
 ```
 
-On the tested Limine setup, this was added to `/etc/default/limine`:
+Add it with your bootloader's supported method, reboot or replug, then verify
+`045e:028e` with `lsusb`. A controller already connected during cold boot could
+still choose HID mode; the included service safely re-authorizes only the
+matching ZhiXu device:
 
-```bash
-KERNEL_CMDLINE[default]+="... usbcore.quirks=057e:2009:ik"
-sudo limine-update
-```
-
-After a physical unplug/replug, the controller reappeared as `045e:028e` and
-bound to `xpad`.
-
-On the tested machine, a reboot could still leave the already-plugged
-controller in `0079:181c` until it was unplugged and replugged once. The kernel
-parameter was present, but the cold-boot USB enumeration still used HID mode.
-To automate the post-boot re-enumeration, install and enable the helper:
-
-```bash
-sudo install -Dm755 scripts/zhixu-controller-ensure-xpad-mode.sh /usr/local/sbin/zhixu-controller-ensure-xpad-mode
-sudo install -Dm644 systemd/zhixu-controller-ensure-xpad-mode.service /etc/systemd/system/zhixu-controller-ensure-xpad-mode.service
-sudo install -Dm644 udev/99-zhixu-controller-xpad-mode.rules /etc/udev/rules.d/99-zhixu-controller-xpad-mode.rules
+```sh
+sudo install -Dm755 scripts/zhixu-controller-ensure-xpad-mode.sh \
+  /usr/local/sbin/zhixu-controller-ensure-xpad-mode
+sudo install -Dm644 systemd/zhixu-controller-ensure-xpad-mode.service \
+  /etc/systemd/system/zhixu-controller-ensure-xpad-mode.service
+sudo install -Dm644 udev/99-zhixu-controller-xpad-mode.rules \
+  /etc/udev/rules.d/99-zhixu-controller-xpad-mode.rules
 sudo systemctl daemon-reload
 sudo udevadm control --reload
-sudo systemctl enable zhixu-controller-ensure-xpad-mode.service
+sudo systemctl enable --now zhixu-controller-ensure-xpad-mode.service
 ```
 
-The service does nothing when the controller is already `045e:028e`. If it sees
-`0079:181c` with manufacturer `ZhiXu`, it de-authorizes and re-authorizes that
-USB device so it can enumerate again after `usbcore.quirks=057e:2009:ik` is
-active. The udev rule makes the same helper run whenever the bad HID identity
-appears later.
+It exits untouched when `045e:028e` is already present. If it sees ZhiXu
+`0079:181c`, it de-authorizes, re-authorizes, and checks for Xbox mode.
 
-Rollback:
+## Phantom right trigger
 
-```bash
+This clone's nominal `RT` byte alternated between released and fully pressed at
+idle, then sometimes stayed latched after a real press. eFootball interpreted
+that as repeated dash dribble. Because no stable replacement signal appeared
+in raw captures, the optional workaround disables `RT` rather than pretending
+to recover it.
+
+```sh
+make
+sudo ./bin/zhixu-rt-suppress-run
+```
+
+The helper sets `zhixu_suppress_rt=Y` only while it runs and restores the prior
+value on normal termination. `SIGKILL` cannot run that restoration. See
+[Phantom RT](docs/efootball-phantom-rt.md) for manual control and evidence.
+
+## Controller as desktop mouse
+
+The tested laptop has no working touchpad, so the same controller drives an
+included AntiMicroX desktop profile. Games must retain the real `xpad` device
+without inheriting AntiMicroX's virtual mouse and keyboard. The optional game
+guard stops only that user mapper while Steam, Lutris, RetroPort, or another
+integrated launcher owns an inhibitor; overlapping games compose safely.
+
+[Desktop mapping and game isolation](docs/desktop-controller-mapping.md)
+contains the architecture, exact installation, launcher integration, runtime
+state, verification, and removal.
+
+## Repository map
+
+| Path | Purpose |
+| --- | --- |
+| `src/xpad.c` | Complete patched driver source |
+| `patches/0001-…patch` | Diff from the matching upstream source |
+| `scripts/apply-to-xpad-dkms-source.sh` | Backup and source replacement |
+| `tools/zhixu-rt-raw-probe.sh` | Timed raw USB capture |
+| `tools/zhixu-rt-suppress-run.c` | Scoped RT-suppression helper |
+| `scripts/zhixu-controller-ensure-xpad-mode.sh` | HID-to-Xbox re-enumeration |
+| `antimicrox/`, `scripts/controller-mouse-*`, `systemd/controller-mouse*` | Desktop mapper and game guard |
+| `docs/investigation-report.md` | Evidence, rejected hypotheses, state changes, rollback |
+
+## Roll back
+
+Restore only the source patch, rebuild each kernel, and reload:
+
+```sh
+target=/usr/src/xpad-r127.9caad15/xpad.c
+sudo cp -a "$target.before-linux-zhixu-controller-fix" "$target"
+kernel=$(uname -r)
+sudo dkms build --force xpad/r127.9caad15 -k "$kernel"
+sudo dkms install --force xpad/r127.9caad15 -k "$kernel"
+sudo modprobe -r xpad
+sudo modprobe xpad
+```
+
+Or remove `xpad-dkms-git` through the package manager and regenerate initramfs.
+To remove mode enforcement:
+
+```sh
 sudo systemctl disable --now zhixu-controller-ensure-xpad-mode.service
-sudo rm -f /etc/systemd/system/zhixu-controller-ensure-xpad-mode.service
-sudo rm -f /usr/local/sbin/zhixu-controller-ensure-xpad-mode
-sudo rm -f /etc/udev/rules.d/99-zhixu-controller-xpad-mode.rules
+sudo rm -f /etc/systemd/system/zhixu-controller-ensure-xpad-mode.service \
+  /usr/local/sbin/zhixu-controller-ensure-xpad-mode \
+  /etc/udev/rules.d/99-zhixu-controller-xpad-mode.rules
 sudo systemctl daemon-reload
 sudo udevadm control --reload
 ```
 
-### Broken-touchpad desktop mouse and game isolation
+Remove `usbcore.quirks=057e:2009:ik` through the bootloader and regenerate its
+configuration separately.
 
-The patched `xpad` device and a desktop controller-to-mouse mapper serve
-different purposes:
+## Licence
 
-- the patched real `Microsoft X-Box 360 pad` must remain visible to games;
-- the included AntiMicroX profile replaces the non-functional laptop touchpad
-  for desktop navigation;
-- AntiMicroX virtual keyboard/mouse devices can cause duplicate or mixed input
-  inside games and must be removed from the game environment.
-
-The repository includes the tested profile, its `controller-mouse.service`,
-manual toggle, and the isolation guard. The guard stops only the user mapper
-service while a guarded game runs. It does not unload `xpad`, grab the real
-controller, change `zhixu_suppress_rt`, or require root privileges. Steam games
-are detected from their `app-steam-app*.scope` systemd units. Lutris uses a
-synchronous command prefix. RetroPort v0.1.6 and newer acquire the guard's
-public inhibitor protocol as part of their emulator process lifecycle. Because
-the tested clone re-enumerates when its final evdev reader closes, the
-persistent guard keeps one non-exclusive read-only descriptor open; games can
-still read the same real controller normally.
-
-Installation, Lutris configuration, runtime behavior, verification, and
-rollback are documented in
-[`docs/desktop-controller-mapping.md`](docs/desktop-controller-mapping.md).
-
-## Verification
-
-Use `evtest`:
-
-```bash
-evtest /dev/input/by-id/usb-ZhiXu_Controller-event-joystick
-```
-
-If `/dev/input/by-id` is not present, use the controller event node shown under
-`/sys/class/input/event*/device/name`. On the tested machine this was often:
-
-```bash
-evtest /dev/input/event17
-```
-
-Expected behavior on the tested controller:
-
-- physical left stick reports `ABS_X` / `ABS_Y`
-- physical D-pad Up/Down reports `ABS_HAT0Y`
-- physical D-pad Right reports `ABS_HAT0X`
-- diagonals are possible as simultaneous `ABS_X` and `ABS_Y`, but this clone
-  reports digital full-scale endpoints rather than smooth analog values
-- force feedback is not exposed for this clone
-
-## License
-
-`src/xpad.c` is derived from the Linux `xpad` driver and keeps its original
-SPDX license: `GPL-2.0-or-later`.
+`src/xpad.c` derives from Linux `xpad` and retains `GPL-2.0-or-later`.

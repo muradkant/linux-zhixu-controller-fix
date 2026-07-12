@@ -1,128 +1,85 @@
-# Broken-Touchpad Desktop Mapping and Game Isolation
+# Desktop controller mapping without in-game interference
 
-The laptop touchpad on the tested machine is physically broken or otherwise
-non-functional. The ZhiXu controller therefore serves two distinct roles:
+On the tested laptop, one physical controller has two jobs: patched `xpad`
+provides the real gamepad, while AntiMicroX replaces a broken touchpad. The
+desktop mapper must disappear inside games without taking the real controller
+with it.
 
-- a real gamepad through the patched `xpad` driver; and
-- a replacement desktop mouse/keyboard through AntiMicroX.
+| Layer | Desktop | Guarded game |
+| --- | --- | --- |
+| Real `Microsoft X-Box 360 pad` through patched `xpad` | Present | Present |
+| AntiMicroX virtual keyboard and mouse | Present | Stopped |
+| Optional `zhixu_suppress_rt` | Unchanged | Unchanged |
 
-The repository includes the tested AntiMicroX profile and its complete service
-lifecycle. This remains separate from the kernel fix: the patched real
-controller must remain available to games, while the mapper's virtual keyboard
-and mouse devices must not.
+The guard controls only `controller-mouse.service`. It never unloads `xpad`,
+unbinds USB, grabs the event device, or changes RT suppression.
 
-## Architecture
+This clone can re-enumerate when AntiMicroX closes its final evdev reader. The
+monitor therefore keeps one non-exclusive, read-only descriptor open and drains
+only its own queue. Games continue reading the same real device.
 
-| Layer | Runtime device | Desktop | Guarded game session |
-| --- | --- | --- | --- |
-| Patched `xpad` | Real `Microsoft X-Box 360 pad` | Present | Present |
-| Included `controller-mouse.service` | AntiMicroX virtual keyboard/mouse | Present | Stopped and absent |
-| Optional RT suppression | `zhixu_suppress_rt` on the real `xpad` device | Unchanged | Unchanged unless manually enabled |
+## Desktop profile
 
-The guard controls only the user service named `controller-mouse.service`.
-It does not unload `xpad`, unbind USB interfaces, grab the real event device,
-or write to `/sys/module/xpad/parameters/zhixu_suppress_rt`.
+`antimicrox/desktop.gamecontroller.amgp` maps:
 
-The tested clone re-enumerates several times when AntiMicroX closes the final
-open evdev reader. To prevent that driver/firmware lifecycle from interrupting
-a game, the persistent guard keeps one non-exclusive, read-only descriptor open
-on the real `Microsoft X-Box 360 pad`. It drains only its own evdev queue and
-does not prevent Steam, Lutris, Wine, or native games from receiving the same
-events.
-
-## Included Desktop Profile
-
-`antimicrox/desktop.gamecontroller.amgp` is the profile currently used on the
-tested machine:
-
-| Controller input | Desktop action |
+| Input | Desktop action |
 | --- | --- |
-| Left stick | Cursor movement, speed 20, Enhanced Precision curve |
-| Right stick up/down | Scroll |
-| D-pad up/down | Scroll |
-| Left trigger | Right click |
-| Right trigger | Left click |
-| A | Left click |
-| B | Right click |
+| Left stick | Cursor, speed 20, Enhanced Precision |
+| Right stick or D-pad up/down | Scroll |
+| Left trigger / B | Right click |
+| Right trigger / A | Left click |
 | X | Middle click |
-| Back | Escape |
-| Start | Enter |
+| Back / Start | Escape / Enter |
 
-The profile targets SDL controller GUID
-`030081b85e0400008e02000010010000`, observed for the tested ZhiXu controller in
-Xbox/xpad mode. Another revision of the controller may expose a different GUID;
-check it with `antimicrox --list` and update both the profile and user unit when
-necessary.
+The tested SDL GUID is `030081b85e0400008e02000010010000`. Run
+`antimicrox --list` before installing on another revision; if its GUID differs,
+update both the profile and `controller-mouse.service`.
 
-The keepalive finds the evdev device by its input name. Override the default
-for a different controller name in the guard service:
+The monitor finds the evdev node by name. Override it in the guard unit when
+needed:
 
 ```ini
 Environment=CONTROLLER_MOUSE_DEVICE_NAME=Another Controller Name
 ```
 
-### Steam
+## How games acquire the guard
 
-Steam's Linux launch wrapper creates transient systemd scopes named
-`app-steam-app<APPID>-<PID>.scope`. The guard subscribes to the systemd user
-manager's `UnitNew` and `UnitRemoved` signals. It stops the mapper as soon as a
-Steam game scope is created and restores it only after the final Steam/Lutris
-game exits.
+The guard reconciles three sources:
 
-The cgroup directory is also checked at startup so restarting the guard while a
-Steam game is already running cannot accidentally enable the mapper.
-
-### Lutris
-
-Lutris supports a global command prefix. `game-with-controller` creates an
-inhibitor before executing the runner command and removes it when that command
-exits. This stops the mapper before the game process starts.
-
-Multiple and overlapping games are supported. Exiting one game cannot restore
-the mapper while another Steam, Lutris, RetroPort, or wrapped game remains
-active.
-
-### RetroPort and the public inhibitor protocol
-
-[RetroPort](https://github.com/muradkant/retrobat-portable) v0.1.6 and newer
-integrates the guard directly. On Linux it discovers
-`~/.local/bin/controller-mouse-game-guard`, or the executable named by
-`CONTROLLER_MOUSE_GAME_GUARD`, and performs this lifecycle:
+- **Steam:** watches `app-steam-app*.scope` units through the user systemd
+  manager, with cgroup and process checks for startup/recovery.
+- **Lutris:** `game-with-controller` creates an inhibitor before executing the
+  runner and releases it after exit.
+- **Integrated launchers:** call the public token protocol directly.
 
 ```text
-before emulator spawn:  controller-mouse-game-guard --inhibit PID-retroport-N
-after full process tree: controller-mouse-game-guard --release PID-retroport-N
+controller-mouse-game-guard --inhibit PID-owner-N
+controller-mouse-game-guard --release PID-owner-N
 ```
 
-The inhibitor remains active through emulator loading, normal exit, and
-RetroPort's TERMINATE action. A failed emulator spawn releases it through the
-same ownership guard. Tokens are unique and compose with existing Steam or
-Lutris inhibitors, so one game cannot restore AntiMicroX while another game
-still owns the controller.
+Tokens compose. The mapper returns only after the final Steam scope, Lutris
+process, RetroPort emulator tree, or explicit inhibitor disappears. PID-prefixed
+stale tokens are removed automatically.
 
-This integration was verified with a real Wine/RetroArch game process: the
-idle state was `sources=none mapper=active restore=no`; during play it became
-`sources=wrapper mapper=inactive restore=yes` with no AntiMicroX process; after
-the complete emulator process tree exited it returned to the exact idle state.
-Wine continued to enumerate the physical XInput controller while the virtual
-desktop mapper was absent.
+[RetroPort](https://github.com/muradkant/retrobat-portable) uses this protocol
+from emulator spawn through normal exit or **TERMINATE**. A failed spawn releases
+the same owned token. Live verification showed `sources=wrapper`, no AntiMicroX
+process, and continued Wine XInput enumeration during play; exit restored the
+exact idle state.
 
 ## Requirements
 
-- AntiMicroX 3.6.1 or a compatible version.
-- `systemd --user` and cgroup v2.
-- Python 3.
-- Read permission for the real controller's `/dev/input/event*` node.
-- `dbus-python` and PyGObject for event-driven Steam detection.
-  If unavailable, the guard falls back to polling Steam scopes every 0.5
-  seconds.
-- Lutris is optional and requires the configuration below.
+- AntiMicroX 3.6.1 or compatible
+- Python 3, `systemd --user`, and cgroup v2
+- read access to the controller's `/dev/input/event*`
+- optional `dbus-python` and PyGObject for event-driven Steam detection; without
+  them the monitor polls every 0.5 seconds
 
-## Installation
+## Install
 
-Install the profile, scripts, and both user units:
+From the repository root:
 
-```bash
+```sh
 install -Dm644 antimicrox/desktop.gamecontroller.amgp \
   "$HOME/.config/antimicrox/desktop.gamecontroller.amgp"
 install -Dm755 scripts/controller-mouse-game-guard \
@@ -141,183 +98,117 @@ systemctl --user enable --now controller-mouse.service
 systemctl --user enable --now controller-mouse-game-guard.service
 ```
 
-No Steam launch options are required.
-
-The mapper can be manually toggled with:
-
-```bash
-controller-mouse-toggle
-```
-
-For Hyprland, an optional binding can execute that command:
-
-```ini
-bind = $mainMod CTRL, M, exec, $HOME/.local/bin/controller-mouse-toggle
-```
-
-### Lutris configuration
-
-Merge the following into `~/.config/lutris/system.yml`, replacing
-`YOUR_USER` with the account name:
+Steam needs no launch option. For Lutris, merge this into
+`~/.config/lutris/system.yml`:
 
 ```yaml
 system:
   prefix_command: /home/YOUR_USER/.local/bin/game-with-controller
 ```
 
-If the file already contains a `system:` mapping, add only the
-`prefix_command` entry beneath it. A game-specific `prefix_command` overrides
-the global value and must include this wrapper separately.
+Add only `prefix_command` if `system:` already exists. A per-game prefix
+overrides the global one, so wrap that game separately. Restart Lutris.
 
-Restart Lutris after changing its configuration.
+Toggle the mapper manually with `controller-mouse-toggle`. An optional Hyprland
+binding is:
 
-## Runtime State
-
-The guard keeps transient state under:
-
-```text
-$XDG_RUNTIME_DIR/controller-mouse-game-guard/
+```ini
+bind = $mainMod CTRL, M, exec, $HOME/.local/bin/controller-mouse-toggle
 ```
 
-It records whether the mapper was active before the first game started. If it
-was manually disabled, finishing a game does not enable it. Inhibitor tokens
-are PID-scoped and stale tokens are removed automatically.
+## Runtime state
 
-Inspect the current state:
+Transient ownership lives under
+`$XDG_RUNTIME_DIR/controller-mouse-game-guard/`. The guard remembers whether the
+mapper was active before the first inhibitor; if it was manually disabled,
+finishing a game does not enable it.
 
-```bash
+```sh
 controller-mouse-game-guard --status
 ```
 
-Typical idle output:
+Typical states:
 
 ```text
 sources=none mapper=active restore=no
-```
-
-Typical Steam in-game output:
-
-```text
 sources=steam mapper=inactive restore=yes
+sources=wrapper mapper=inactive restore=yes
 ```
 
-An integrated launcher such as RetroPort reports `sources=wrapper` instead.
+## Verify
 
-## Verification
+Baseline:
 
-The following tests do not launch a real game, but exercise the same Steam
-scope and Lutris prefix paths. They briefly stop and restore the desktop mapper.
-
-### Baseline
-
-```bash
+```sh
 systemctl --user is-active controller-mouse.service
 systemctl --user is-active controller-mouse-game-guard.service
 controller-mouse-game-guard --status
 ```
 
-Both services should be active and the guard should report `sources=none`.
+Both services should be active and sources should be `none`.
 
-### Steam scope
+Exercise Steam detection without launching a game:
 
-In one terminal:
-
-```bash
+```sh
 systemd-run --user --scope \
   --unit=app-steam-app999999-isolation-test sleep 10
 ```
 
-While it runs, check:
+Or exercise the Lutris path:
 
-```bash
-systemctl --user is-active controller-mouse.service
+```sh
+"$HOME/.local/bin/game-with-controller" sleep 10
+```
+
+While either runs:
+
+```sh
+systemctl --user is-active controller-mouse.service || true
 grep -E 'antimicrox .* Emulation|Microsoft X-Box 360 pad' \
   /proc/bus/input/devices
 ```
 
-Expected:
+The mapper should be inactive, its virtual devices absent, and the real
+controller present. No new USB disconnect should appear merely because the
+mapper stopped. After ten seconds the prior mapper state should return.
 
-- `controller-mouse.service` is inactive or deactivating;
-- no AntiMicroX emulation devices are listed;
-- the real `Microsoft X-Box 360 pad` remains listed.
-- no new `usb ... USB disconnect` kernel messages appear when the mapper stops.
+For an integrated launcher, inspect the same evidence during a real game:
 
-After `sleep` exits, the mapper should become active again.
-
-### Lutris prefix
-
-In one terminal:
-
-```bash
-"$HOME/.local/bin/game-with-controller" sleep 10
-```
-
-Run the same service and input-device checks in another terminal. The expected
-state is identical to the Steam test.
-
-### RetroPort lifecycle
-
-With an imported RetroPort game, click PLAY and inspect the guard while the
-emulator is running:
-
-```bash
+```sh
 controller-mouse-game-guard --status
-systemctl --user is-active controller-mouse.service || true
 pgrep -x antimicrox || true
 ```
 
-Expected during play: `sources=wrapper`, mapper inactive, and no AntiMicroX
-PID. Exit normally or use TERMINATE. The expected final state is
-`sources=none mapper=active restore=no`, with AntiMicroX running again.
+The persistent monitor should also hold a real event node:
 
-### Patched driver remains active
-
-Identify the controller's USB interface and verify its driver:
-
-```bash
-for interface in /sys/bus/usb/devices/*:*; do
-  if [ -L "$interface/driver" ] &&
-     [ "$(basename "$(readlink -f "$interface/driver")")" = xpad ]; then
-    printf '%s -> xpad\n' "${interface##*/}"
-  fi
-done
-```
-
-Stopping AntiMicroX must not remove this binding or the real controller's
-`event`/`js` nodes.
-
-The persistent guard should also hold the real event node open:
-
-```bash
-guard_pid="$(systemctl --user show controller-mouse-game-guard.service \
-  --property MainPID --value)"
+```sh
+guard_pid=$(systemctl --user show controller-mouse-game-guard.service \
+  --property MainPID --value)
 readlink -f "/proc/$guard_pid"/fd/* | grep '/dev/input/event'
 ```
 
-## Failure Recovery and Removal
+## Recover or remove
 
-If the guard is stopped unexpectedly while it owns mapper restoration state:
+If a stopped guard leaves restoration pending:
 
-```bash
+```sh
 controller-mouse-game-guard --once
 systemctl --user start controller-mouse.service
 ```
 
-To remove the integration:
+Remove the integration:
 
-```bash
+```sh
 systemctl --user disable --now controller-mouse-game-guard.service
 systemctl --user disable --now controller-mouse.service
-rm -f "$HOME/.config/systemd/user/controller-mouse-game-guard.service"
-rm -f "$HOME/.config/systemd/user/controller-mouse.service"
-rm -f "$HOME/.config/antimicrox/desktop.gamecontroller.amgp"
-rm -f "$HOME/.local/bin/controller-mouse-game-guard"
-rm -f "$HOME/.local/bin/controller-mouse-toggle"
-rm -f "$HOME/.local/bin/game-with-controller"
+rm -f "$HOME/.config/systemd/user/controller-mouse-game-guard.service" \
+  "$HOME/.config/systemd/user/controller-mouse.service" \
+  "$HOME/.config/antimicrox/desktop.gamecontroller.amgp" \
+  "$HOME/.local/bin/controller-mouse-game-guard" \
+  "$HOME/.local/bin/controller-mouse-toggle" \
+  "$HOME/.local/bin/game-with-controller"
 systemctl --user daemon-reload
 ```
 
-Also remove `prefix_command` from `~/.config/lutris/system.yml`.
-
-The kernel patch, USB mode-enforcement service, and optional RT suppression are
-not changed by installing or removing this desktop isolation layer.
+Remove Lutris's `prefix_command` separately. This procedure does not touch the
+kernel patch, USB mode service, or RT suppression.

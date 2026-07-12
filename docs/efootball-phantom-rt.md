@@ -1,72 +1,55 @@
-# eFootball Phantom RT Workaround
+# Phantom right-trigger suppression
 
-The tested ZhiXu `045e:028e` Xbox 360 clone can report phantom right-trigger
-input in Xbox mode. In eFootball this appears as unintended dash-dribble
-behavior while only the left stick is being used.
+The tested ZhiXu `045e:028e` clone reports unreliable right-trigger input in
+Xbox mode. eFootball rendered it as unsolicited dash dribble while only the
+left stick moved.
 
-## Cause
+Linux exposes Xbox 360 `RT` as `ABS_RZ`. Raw USB capture proved the fault below
+Wine and the game: its source byte alternated between `0x00` and `0xff` at idle,
+showed no stable held state, and could remain latched after release. No other
+packet byte tracked the physical trigger reliably.
 
-For Xbox 360 controllers, Linux `xpad` exposes the right trigger as
-`ABS_RZ`. On the tested controller, the raw USB packet byte that stock `xpad`
-uses for `ABS_RZ` alternated between `0x00` and `0xff` while idle. After a
-physical `RT` press, the same byte could also remain latched at the raw value
-seen while pressed.
-
-Raw USB captures did not show another stable packet byte that tracked the
-physical right trigger in Xbox mode. Because of that, this workaround does not
-try to recover `RT`; it only disables the unreliable `RT` report while active.
-
-## Runtime Helper
-
-The patched driver adds a module parameter:
+The patch therefore adds a device-scoped module parameter:
 
 ```text
 /sys/module/xpad/parameters/zhixu_suppress_rt
 ```
 
-Install and load the patched `xpad` module from the main README first. The
-helper expects the parameter above to exist.
+It defaults to `N`. When `Y`, only this clone's `ABS_RZ` is forced to released;
+the real controller remains on its original event and joystick nodes, with no
+grab or virtual proxy. The unavoidable tradeoff is that physical `RT` is also
+unavailable.
 
-Build the helper:
+After installing and loading the patched driver, build and run the scoped
+helper:
 
-```bash
+```sh
 make
-```
-
-Run it while playing:
-
-```bash
 sudo ./bin/zhixu-rt-suppress-run
 ```
 
-While the helper runs, it sets `zhixu_suppress_rt` to `Y`. Stop it with
-`Ctrl+C`; it restores the previous parameter value before exiting.
-The previous value is not restored if the process is killed with `SIGKILL`.
+It remembers the current parameter, writes `Y`, waits in the foreground, and
+restores the remembered value on `Ctrl+C`, `SIGTERM`, or `SIGHUP`. `SIGKILL`
+cannot be handled; restore manually after one:
 
-The controller remains the same real `Microsoft X-Box 360 pad` device. No
-virtual controller is created, and the real event device is not grabbed.
-
-## Tradeoff
-
-While the helper is running, `RT` is unavailable. All other controller mappings
-remain handled by the core ZhiXu `xpad` patch.
-
-## Manual Control
-
-Enable for the current boot:
-
-```bash
-echo Y | sudo tee /sys/module/xpad/parameters/zhixu_suppress_rt
-```
-
-Disable for the current boot:
-
-```bash
+```sh
 echo N | sudo tee /sys/module/xpad/parameters/zhixu_suppress_rt
 ```
 
-Set the boot default to disabled:
+Manual enable and disable affect the current module load only:
 
-```bash
-echo 'options xpad zhixu_suppress_rt=0' | sudo tee /etc/modprobe.d/zhixu-xpad.conf
+```sh
+echo Y | sudo tee /sys/module/xpad/parameters/zhixu_suppress_rt
+echo N | sudo tee /sys/module/xpad/parameters/zhixu_suppress_rt
 ```
+
+To state the disabled boot default explicitly:
+
+```sh
+echo 'options xpad zhixu_suppress_rt=0' | \
+  sudo tee /etc/modprobe.d/zhixu-xpad.conf
+```
+
+Verify idle suppression with `evtest`: `ABS_RZ` should begin at `0` and emit no
+events while untouched. All other mappings remain governed by the main ZhiXu
+patch.
