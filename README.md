@@ -109,6 +109,9 @@ sudo systemctl enable --now zhixu-controller-ensure-xpad-mode.service
 
 It exits untouched when `045e:028e` is already present. If it sees ZhiXu
 `0079:181c`, it de-authorizes, re-authorizes, and checks for Xbox mode.
+The boot unit orders after udev coldplug is triggered but never waits for the
+deprecated global `systemd-udev-settle.service`; the matching udev rule invokes
+the same idempotent helper for devices that finish later or are hotplugged.
 
 ## Phantom right trigger
 

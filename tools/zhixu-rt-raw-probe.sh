@@ -44,6 +44,8 @@ echo "  ${duration_release}s: release RT and do not touch the controller"
 	echo "# idle ${duration_idle}s"
 } >"$out_file"
 
+# The program is intentionally single-quoted; bus and device enter via -v.
+# shellcheck disable=SC2016
 stdbuf -oL awk -v bus="$bus_num" -v dev="$dev_num" '
 	BEGIN {
 		pattern = "C Ii:0*" bus ":0*" dev ":"
